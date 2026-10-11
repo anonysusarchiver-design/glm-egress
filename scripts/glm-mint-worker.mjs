@@ -12,13 +12,20 @@
 //        MINT_MODE=chromium|headful|headless
 //        RUNNER_LABEL=2   matrix label for source tagging (default "1")
 //        MAX_RUNTIME_S=3300  wall-clock self-exit (default 55 min)
+//        F001_EXIT_STREAK=8  exit after N consecutive F001 (IP rate-fuse blown;
+//                            rotation beats drip; 0 = never exit on F001)
 // Logs NEVER print full params (fingerprint + length only).
 //
+// IP budget law (measured 2026-10-11, run 38116540255): a fresh runner IP lands
+// ~4-6 quick solves, then a hard F001 fuse with only sporadic drip (~1 solve per
+// 15-30 rejects). Scale = ROTATE runners (fresh IP per run), never extend one.
+//
 // Failure taxonomy (counted in MINT-BRIDGE-RESULT):
-//   failed      mint failures (F011 = Aliyun fatigue on THIS runner IP)
-//   pushFailed  relay push failures   |  rateLimited = relay 429 (budget)
+//   failed      mint failures          |  f011/f001 = consecutive fatigue streak
+//   pushFailed  relay push failures    |  rateLimited = relay 429 (budget)
 //   3 consecutive push auth/format failures (relay 400/401) -> exit 2 (config bug)
 //   F011 x4 consecutive -> exit early (IP flagged; use a NEW run = new IP)
+//   F001 x F001_EXIT_STREAK consecutive -> exit early (rate-fuse; rotate)
 import crypto from "node:crypto";
 
 const CYCLES = Math.max(1, Math.min(1000, Number(process.argv[2] || 60) || 60));
@@ -27,6 +34,7 @@ const RELAY = (process.env.RELAY_URL || "").replace(/\/+$/, "");
 const TOKEN = process.env.MINT_RELAY_TOKEN || "";
 const FORCE = process.env.FORCE === "1";
 const TARGET_POOL = Math.max(0, Number(process.env.TARGET_POOL || 0) || 0);
+const F001_EXIT_STREAK = Math.max(0, Number(process.env.F001_EXIT_STREAK || 8) || 0);
 const MAX_RUNTIME_MS = Math.max(60, Number(process.env.MAX_RUNTIME_S || 3300) || 3300) * 1000;
 const T0 = Date.now();
 const SRC = `gh-${process.env.GITHUB_RUN_ID || "local"}-${process.env.RUNNER_LABEL || "1"}-${process.env.MINT_MODE || "chromium"}`;
@@ -194,16 +202,17 @@ async function mintOnce(page) {
     } catch { /* best-effort stealth */ }
   });
   const page = await context.newPage();
-  let minted = 0, pushed = 0, failed = 0, f011 = 0, idleSkips = 0, rateLimited = 0, pushFailed = 0;
+  let minted = 0, pushed = 0, failed = 0, f011 = 0, f001 = 0, idleSkips = 0, rateLimited = 0, pushFailed = 0;
   let pushAuthFail = 0;
   const finish = async () => {
     await browser.close().catch(() => {});
-    const summary = { minted, pushed, failed, f011, idleSkips, rateLimited, pushFailed, cycles: CYCLES, target_pool: TARGET_POOL, src: SRC, wall_s: Math.round((Date.now() - T0) / 1000) };
+    const summary = { minted, pushed, failed, f011, f001, idleSkips, rateLimited, pushFailed, cycles: CYCLES, target_pool: TARGET_POOL, src: SRC, wall_s: Math.round((Date.now() - T0) / 1000) };
     log(`MINT-BRIDGE-RESULT ${JSON.stringify(summary)}`);
   };
   for (let i = 1; i <= CYCLES; i++) {
     if (Date.now() - T0 > MAX_RUNTIME_MS) { log("wall-clock deadline reached — exiting cleanly"); break; }
     if (f011 >= 4) { log("F011 x4 consecutive — runner IP looks flagged, exiting early"); break; }
+    if (F001_EXIT_STREAK > 0 && f001 >= F001_EXIT_STREAK) { log(`F001 x${f001} consecutive — runner IP rate-fuse blown, exiting for a fresh IP`); break; }
     if (FORCE) {
       if (TARGET_POOL > 0) {
         const n = await getNeed();
@@ -229,6 +238,7 @@ async function mintOnce(page) {
     if (res.ok) {
       minted++;
       f011 = 0;
+      f001 = 0;
       const p = await pushParam(res.param);
       if (p.ok) {
         pushed++;
@@ -247,6 +257,7 @@ async function mintOnce(page) {
     } else {
       failed++;
       if (/F011/.test(res.err)) { f011++; log(`[${i}] mint FAIL (F011 streak ${f011}): ${res.err.slice(0, 140)}`); }
+      else if (/F001/.test(res.err)) { f001++; log(`[${i}] mint FAIL (F001 streak ${f001}): ${res.err.slice(0, 140)}`); }
       else log(`[${i}] mint FAIL: ${res.err.slice(0, 140)}`);
     }
     await sleep(Math.floor(GAP_S * 1000 * (0.6 + Math.random() * 0.8)));

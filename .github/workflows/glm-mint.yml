@@ -76,6 +76,9 @@ jobs:
       TARGET_POOL: ${{ github.event.inputs.target_pool }}
       MINT_MODE: ${{ github.event.inputs.mode }}
       RUNNER_LABEL: ${{ matrix.runner }}
+      # IP budget law: a fresh runner IP lands ~4-6 quick solves, then F001.
+      # Exit after 8 consecutive F001 so the dispatcher rotates to a fresh IP.
+      F001_EXIT_STREAK: "8"
     steps:
       - name: Mask relay token in all logs
         run: echo "::add-mask::${{ secrets.MINT_RELAY_TOKEN }}"

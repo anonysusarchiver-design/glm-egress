@@ -24,19 +24,24 @@ node ..\mint-bridge.mjs mint --k 4 --target 8     # burst: 4 fresh IPs fill pool
 node ..\mint-bridge.mjs status                    # relay stats + tunnel + pool + runs
 ```
 
-## Scale laws (measured)
+## Scale laws (measured 2026-10-11)
 
-- Runner lifecycle: one runner drains its cycles, then dies — fresh work = fresh run = fresh IP
-  (per-IP F011 fatigue pools are independent).
-- Per-runner supply ≈ `60 / (nav 2-5s + solve 1-2s + gap_s)` params/min.
+- **IP budget law (the binding constraint):** a fresh runner IP lands **~4-6 quick solves
+  (0.7-1.9s each), then F001 fuse** — after the fuse only a sporadic drip (~1 solve per
+  15-30 rejects). There is NO sustained-rate mode: **scale = rotate runners** (fresh IP per
+  run), never extend one. Workers exit on F001×8 so a burned IP frees its runner fast.
+- **Mint K params ≈ dispatch ceil(K/5) runners**, deliverable within ~2-3 min of dispatch
+  (runner boot+playwright ≈ 40-60s, then ~5 solves in ~40s).
 - Relay global budget: **20 pushes/min** → size K · rate ≤ 20/min (e.g. K=4 @ gap 8 ≈ 18/min).
   Workers get one paced retry on 429; sustained overflow is a planner error, not a worker error.
-- `target_pool` makes bursts self-limiting: workers idle once the pool hits the target.
+- `target_pool` makes bursts self-limiting: workers idle once the pool hits the target
+  (pool max 8, TTL 150s, usable age ≤ 90s — the gateway drops staler params at pop).
 - GitHub concurrency: dispatches do not queue (group is per-run); matrix `max-parallel: 16`.
 - Wall-clock self-exit at 55 min (job timeout 70) so runs end cleanly even while idling.
 
 ## Failure taxonomy (worker counts -> MINT-BRIDGE-RESULT)
 
-`mint FAIL` F011×4 → exit (runner IP flagged; get a new run) · `nav/eval` timeouts → retry next
-cycle · push `relay 429` → paced retry once, else counted `rateLimited` · push `relay 400/401`
-×3 consecutive → exit 2 (token/contract mismatch) · run wall-clock → clean exit.
+`mint FAIL` F011×4 → exit (IP flagged; new run) · F001×8 (`F001_EXIT_STREAK`) → exit (rate-fuse;
+rotate IP) · `nav/eval` timeouts → retry next cycle · push `relay 429` → paced retry once, else
+counted `rateLimited` · push `relay 400/401` ×3 consecutive → exit 2 (token/contract mismatch) ·
+wall-clock deadline → clean exit. `f011`/`f001` in the summary are final consecutive streaks.
