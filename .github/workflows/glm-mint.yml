@@ -1,0 +1,99 @@
+# GLM mint egress lane (v2, SCALE-READY) — fresh-IP Aliyun captcha minting for the local glm-fleet gateway.
+# Each runner = a fresh GitHub-hosted IP that mints chat.z.ai captcha params with
+# playwright chromium and pushes them to the local relay (cloudflared quick tunnel
+# -> gateway pool). Params are single-use, sub-90s freshness; a runner stays alive
+# to serve demand, bounded by cycles / target_pool / MAX_RUNTIME (55 min) / job timeout.
+#
+# Scale: `runners` is a JSON array — ["1","2","3"] fans out 3 PARALLEL runners
+# (3 fresh egress IPs). Dispatches never queue behind each other (concurrency group
+# is per-run). Delivery is concurrency-safe by construction: every param is unique
+# (single-use at the gateway), every push carries a run/label src tag, and the relay
+# rate-limits globally (20/min) with one paced retry per push on 429.
+#
+# No secrets in this repo: the only credential is the Actions repo secret
+# MINT_RELAY_TOKEN (token-gates the 127.0.0.1 relay; masked in logs).
+#
+# Dispatch (by the local orchestrator: node mint-bridge.mjs start|mint ..., or directly):
+#   POST /repos/anonysusarchiver-design/glm-egress/actions/workflows/glm-mint.yml/dispatches
+#   {"ref":"main","inputs":{"relay_url":"https://x.trycloudflare.com","cycles":"40","gap_s":"6",
+#    "force":"1","target_pool":"8","mode":"chromium","runners":"[\"1\",\"2\"]"}}
+name: glm-mint-egress
+run-name: glm-mint ${{ github.event.inputs.runners }} mode=${{ github.event.inputs.mode }} target=${{ github.event.inputs.target_pool }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      relay_url:
+        description: "relay base URL (cloudflared quick tunnel), e.g. https://xxxx.trycloudflare.com"
+        required: true
+      cycles:
+        description: "max mint cycles per runner"
+        required: false
+        default: "60"
+      gap_s:
+        description: "base seconds between mint cycles (jittered 0.6-1.4x)"
+        required: false
+        default: "6"
+      force:
+        description: "1 = mint regardless of relay /need (use with target_pool for bursts)"
+        required: false
+        default: ""
+      target_pool:
+        description: "with force=1: fill the gateway pool to N then idle (0 = keep minting)"
+        required: false
+        default: "0"
+      mode:
+        description: "launch mode: chromium | headful | headless"
+        required: false
+        default: "chromium"
+      runners:
+        description: 'JSON array of runner labels; K entries = K parallel runners (fresh IP each)'
+        required: false
+        default: '["1"]'
+
+# Per-dispatch concurrency group: dispatches (and N-runner matrices) never queue
+# behind an earlier run. Same run stays intact (cancel-in-progress: false).
+concurrency:
+  group: glm-mint-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        runner: ${{ fromJSON(github.event.inputs.runners || '["1"]') }}
+    env:
+      RELAY_URL: ${{ github.event.inputs.relay_url }}
+      MINT_RELAY_TOKEN: ${{ secrets.MINT_RELAY_TOKEN }}
+      FORCE: ${{ github.event.inputs.force }}
+      TARGET_POOL: ${{ github.event.inputs.target_pool }}
+      MINT_MODE: ${{ github.event.inputs.mode }}
+      RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      - name: Mask relay token in all logs
+        run: echo "::add-mask::${{ secrets.MINT_RELAY_TOKEN }}"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright + Chromium
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm i playwright@1.49.0 --no-save
+          npx playwright install --with-deps chromium
+      - name: Mint loop (fresh-IP params -> local relay)
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "headful" ]; then
+            xvfb-run -a node scripts/glm-mint-worker.mjs "${{ github.event.inputs.cycles }}" "${{ github.event.inputs.gap_s }}"
+          else
+            node scripts/glm-mint-worker.mjs "${{ github.event.inputs.cycles }}" "${{ github.event.inputs.gap_s }}"
+          fi
