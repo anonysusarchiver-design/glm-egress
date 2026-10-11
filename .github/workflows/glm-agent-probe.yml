@@ -1,0 +1,65 @@
+# glm-agent-probe — CROSS-IP AGENT CAPACITY EXPERIMENT (staged; copy to glm-egress/.github/workflows/)
+#
+# Fires N minimal REAL agent turns at chat.z.ai from a FRESH GitHub-runner IP and
+# prints a single greppable verdict line:  GLM-AGENT-PROBE-VERDICT {...}
+# Combined (same-moment) with the local-IP arm (glm-fleet/scripts/probe-agent-light.mjs),
+# this settles H1 (agent-capacity gate is per-IP) vs H0 (global/account).
+#
+# No tunnel, no relay, no local machine contact. Logs read via the GitHub API.
+#
+# Credential: ONE fleet-owned account, supplied as repo Actions secret
+#   GLM_PROBE_ACCOUNT = {"token":"...","user_id":"...","index":<n>}
+# (encrypted at rest, ::add-mask::'d, never printed by the script).
+# No new signups. Fleet accounts only (shared/fleet-accounts.json).
+
+name: glm-agent-probe
+run-name: glm-agent-probe samples=${{ github.event.inputs.samples }} model=${{ github.event.inputs.model }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: "agent-turn samples per run (3 recommended)"
+        required: false
+        default: "3"
+      gap_s:
+        description: "seconds between samples"
+        required: false
+        default: "30"
+      model:
+        description: "agent model (default x-preview-l = gateway agent default)"
+        required: false
+        default: "x-preview-l"
+
+concurrency:
+  group: glm-agent-probe-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mask probe credential in all logs
+        run: echo "::add-mask::${{ secrets.GLM_PROBE_ACCOUNT }}"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright + Chromium (captcha mint on the runner IP)
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm i playwright@1.49.0 --no-save
+          npx playwright install --with-deps chromium
+      - name: Agent probe (fresh-IP minimal agent turns -> JSON verdict)
+        env:
+          GLM_PROBE_ACCOUNT: ${{ secrets.GLM_PROBE_ACCOUNT }}
+          PROBE_SAMPLES: ${{ github.event.inputs.samples }}
+          PROBE_GAP_S: ${{ github.event.inputs.gap_s }}
+          PROBE_MODEL: ${{ github.event.inputs.model }}
+        run: node scripts/agent-probe.mjs
